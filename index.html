@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multiple Window 3D Scene – Single File</title>
+  <style>
+    * { margin: 0; padding: 0; }
+    body { overflow: hidden; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.124.0/build/three.min.js"></script>
+</head>
+<body>
+  <script>
+    class WindowManager {
+      constructor() {
+        this._windows = [];
+        this._id = null;
+        this._count = null;
+        this._onShapeChange = null;
+        this._onListChange = null;
+
+        window.addEventListener('storage', event => {
+          if (event.key === 'windows') {
+            const newWins = JSON.parse(event.newValue || '[]');
+            const changed =
+              this._windows.length !== newWins.length ||
+              this._windows.some((w, i) => w.id !== newWins[i].id);
+            this._windows = newWins;
+            if (changed && typeof this._onListChange === 'function') {
+              this._onListChange();
+            }
+          }
+        });
+
+        window.addEventListener('beforeunload', () => {
+          const idx = this._indexForId(this._id);
+          if (idx >= 0) {
+            this._windows.splice(idx, 1);
+            this._save();
+          }
+        });
+      }
+
+      init(meta = {}) {
+        this._windows = JSON.parse(localStorage.getItem('windows') || '[]');
+        this._count = parseInt(localStorage.getItem('winCount') || '0', 10) + 1;
+        this._id = this._count;
+        const shape = this._currentShape();
+        const entry = { id: this._id, shape: shape, metaData: meta };
+        this._windows.push(entry);
+        localStorage.setItem('winCount', String(this._count));
+        this._save();
+      }
+
+      _currentShape() {
+        return {
+          x: window.screenLeft,
+          y: window.screenTop,
+          w: window.innerWidth,
+          h: window.innerHeight
+        };
+      }
+
+      _save() {
+        localStorage.setItem('windows', JSON.stringify(this._windows));
+      }
+
+      _indexForId(id) {
+        return this._windows.findIndex(item => item.id === id);
+      }
+
+      update() {
+        const idx = this._indexForId(this._id);
+        if (idx < 0) return;
+        const shape = this._currentShape();
+        const stored = this._windows[idx];
+        if (
+          shape.x !== stored.shape.x ||
+          shape.y !== stored.shape.y ||
+          shape.w !== stored.shape.w ||
+          shape.h !== stored.shape.h
+        ) {
+          this._windows[idx] = { id: stored.id, shape: shape, metaData: stored.metaData };
+          if (typeof this._onShapeChange === 'function') {
+            this._onShapeChange();
+          }
+          this._save();
+        }
+      }
+
+      setOnWindowShapeChange(cb) {
+        this._onShapeChange = cb;
+      }
+
+      setOnWindowListChange(cb) {
+        this._onListChange = cb;
+      }
+
+      getWindows() {
+        return this._windows.slice();
+      }
+    }
+  </script>
+
+  <script type="module">
+    const T = THREE;
+
+    let renderer, camera, scene, world, windowManager;
+    let torus, sphere;
+    let sceneOffset = { x: 0, y: 0 };
+    let sceneOffsetTarget = { x: 0, y: 0 };
+    let initialised = false;
+
+    function secondsSinceMidnight() {
+      const now = new Date();
+      return (
+        now.getHours() * 3600 +
+        now.getMinutes() * 60 +
+        now.getSeconds() +
+        now.getMilliseconds() / 1000
+      );
+    }
+
+    function setupScene() {
+      camera = new T.OrthographicCamera();
+      scene = new T.Scene();
+      renderer = new T.WebGLRenderer({ antialias: true, depthBuffer: true });
+      renderer.setPixelRatio(window.devicePixelRatio || 1);
+      world = new T.Object3D();
+      scene.add(camera);
+      scene.add(world);
+      renderer.domElement.id = 'scene';
+      document.body.appendChild(renderer.domElement);
+
+      // Create a central sphere
+      const sphereGeo = new T.SphereGeometry(50, 32, 32);
+      const sphereMat = new T.MeshBasicMaterial({ color: 0xffffff });
+      sphere = new T.Mesh(sphereGeo, sphereMat);
+      world.add(sphere);
+
+      // Create the torus that will rotate around the sphere
+      const torusGeo = new T.TorusGeometry(150, 20, 16, 100);
+
+      // The torus will be colored using a vertex color gradient
+      const colors = [];
+      const color = new T.Color();
+      const totalVerts = torusGeo.attributes.position.count;
+      for (let i = 0; i < totalVerts; i++) {
+        const t = i / totalVerts;
+        color.setHSL(0.667 * t, 1.0, 0.5); // red -> blue
+        colors.push(color.r, color.g, color.b);
+      }
+      torusGeo.setAttribute('color', new T.Float32BufferAttribute(colors, 3));
+      const torusMat = new T.MeshBasicMaterial({ vertexColors: true, wireframe: true });
+      torus = new T.Mesh(torusGeo, torusMat);
+      world.add(torus);
+    }
+
+    function setupWindowManager() {
+      windowManager = new WindowManager();
+      windowManager.setOnWindowShapeChange(updateOffset);
+      const meta = { created: new Date().toISOString() };
+      windowManager.init(meta);
+    }
+
+    function updateOffset(easing = true) {
+      sceneOffsetTarget = { x: -window.screenX, y: -window.screenY };
+      if (!easing) {
+        sceneOffset = { ...sceneOffsetTarget };
+      }
+    }
+
+    function updateSceneSize() {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      camera.left = 0;
+      camera.right = width;
+      camera.top = 0;
+      camera.bottom = height;
+      camera.near = -10000;
+      camera.far = 10000;
+      camera.updateProjectionMatrix();
+      renderer.setSize(width, height);
+    }
+
+    function render() {
+      windowManager.update();
+      const falloff = 0.05;
+      sceneOffset.x += (sceneOffsetTarget.x - sceneOffset.x) * falloff;
+      sceneOffset.y += (sceneOffsetTarget.y - sceneOffset.y) * falloff;
+      world.position.x = sceneOffset.x;
+      world.position.y = sceneOffset.y;
+
+      // Rotate the torus around the sphere
+      const t = secondsSinceMidnight();
+      torus.rotation.y = t * 0.5;
+
+      renderer.render(scene, camera);
+      requestAnimationFrame(render);
+    }
+
+    function start() {
+      if (initialised) return;
+      initialised = true;
+      setTimeout(() => {
+        setupScene();
+        setupWindowManager();
+        updateSceneSize();
+        updateOffset(false);
+        render();
+        window.addEventListener('resize', updateSceneSize);
+      }, 500);
+    }
+
+    if (new URLSearchParams(window.location.search).has('clear')) {
+      localStorage.clear();
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState !== 'hidden') {
+        start();
+      }
+    });
+    window.addEventListener('load', () => {
+      if (document.visibilityState !== 'hidden') {
+        start();
+      }
+    });
+  </script>
+</body>
+</html>
